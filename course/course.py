@@ -402,32 +402,52 @@ def update_course(current_user, course_id):
 @admin_required
 def delete_course(current_user, course_id):
     try:
+        # Проверяем существование курса
         course = session.query(Course).filter_by(id=course_id).first()
         if not course:
             return jsonify({'error': 'Course not found'}), 404
-            
-        # Удаляем файл thumbnail
-        delete_file(course.thumbnail_url)
+
+        # Удаляем файл thumbnail если он существует
+        if course.thumbnail_url:
+            delete_file(course.thumbnail_url)
             
         # Удаляем все видео курса
         videos = session.query(Video).filter_by(course_id=course_id).all()
         for video in videos:
-            delete_file(video.file_path)
-            delete_file(video.thumbnail_url)
+            if video.file_path:
+                delete_file(video.file_path)
+            if video.thumbnail_url:
+                delete_file(video.thumbnail_url)
+            session.delete(video)
             
         # Удаляем все PDF документы курса
         pdfs = session.query(PdfDocument).filter_by(course_id=course_id).all()
         for pdf in pdfs:
-            delete_file(pdf.file_path)
+            if pdf.file_path:
+                delete_file(pdf.file_path)
+            session.delete(pdf)
+
+        # Удаляем все записи о доступе к курсу
+        course_accesses = session.query(CourseAccess).filter_by(course_id=course_id).all()
+        for access in course_accesses:
+            session.delete(access)
         
-        # Удаляем курс, видео и PDF удаляются каскадно
+        # Удаляем сам курс
         session.delete(course)
         session.commit()
-        return jsonify({'message': 'Course deleted successfully'}), 200
         
+        return jsonify({'message': 'Course and all related content deleted successfully'}), 200
+        
+    except SQLAlchemyError as e:
+        session.rollback()
+        print(f"Database error in delete_course: {str(e)}")
+        return jsonify({'error': f'Database error: {str(e)}'}), 500
     except Exception as e:
         session.rollback()
-        return jsonify({'error': str(e)}), 500
+        print(f"Unexpected error in delete_course: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
     
 @course_bp.route('/users', methods=['GET'])
 @admin_required
