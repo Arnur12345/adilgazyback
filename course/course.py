@@ -428,9 +428,7 @@ def delete_course(current_user, course_id):
             session.delete(pdf)
 
         # Удаляем все записи о доступе к курсу
-        course_accesses = session.query(CourseAccess).filter_by(course_id=course_id).all()
-        for access in course_accesses:
-            session.delete(access)
+        session.query(CourseAccess).filter_by(course_id=course_id).delete()
         
         # Удаляем сам курс
         session.delete(course)
