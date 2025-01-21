@@ -51,6 +51,16 @@ class Video(Base):
     order = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+class PdfDocument(Base):
+    __tablename__ = 'pdf_documents'
+    
+    id = Column(Integer, primary_key=True)
+    title = Column(String(200), nullable=False)
+    file_path = Column(String(500), nullable=False)  # URL or path to PDF file
+    course_id = Column(Integer, ForeignKey('courses.id'), nullable=False)
+    order = Column(Integer, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 class CourseAccess(Base):
     __tablename__ = 'course_access'
     

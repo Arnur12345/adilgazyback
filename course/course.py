@@ -2,7 +2,7 @@ from flask import Blueprint, request, jsonify, send_file
 from datetime import datetime, timedelta
 import os
 from werkzeug.utils import secure_filename
-from models import session, Course, CourseAccess, Video, User, Comment
+from models import session, Course, CourseAccess, Video, User, Comment, PdfDocument
 from auth import token_required, admin_required
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -12,12 +12,14 @@ course_bp = Blueprint('course', __name__)
 UPLOAD_FOLDER = 'uploads'
 COURSE_UPLOAD_FOLDER = os.path.join(UPLOAD_FOLDER, 'courses')
 VIDEO_UPLOAD_FOLDER = os.path.join(UPLOAD_FOLDER, 'videos')
+PDF_UPLOAD_FOLDER = os.path.join(UPLOAD_FOLDER, 'pdfs')
 
 ALLOWED_IMAGE_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif'}
 ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'mov', 'avi'}
+ALLOWED_PDF_EXTENSIONS = {'pdf'}
 
 # Создаем необходимые директории если их нет
-for folder in [UPLOAD_FOLDER, COURSE_UPLOAD_FOLDER, VIDEO_UPLOAD_FOLDER]:
+for folder in [UPLOAD_FOLDER, COURSE_UPLOAD_FOLDER, VIDEO_UPLOAD_FOLDER, PDF_UPLOAD_FOLDER]:
     if not os.path.exists(folder):
         os.makedirs(folder)
 
@@ -35,6 +37,184 @@ def save_file(file, folder):
 def delete_file(file_path):
     if file_path and os.path.exists(file_path):
         os.remove(file_path)
+
+@course_bp.route('/course/<int:course_id>/pdfs', methods=['GET'])
+@token_required
+def get_course_pdfs(current_user, course_id):
+    try:
+        # Проверяем существование курса
+        course = session.query(Course).filter_by(id=course_id).first()
+        if not course:
+            return jsonify({'error': 'Course not found'}), 404
+
+        # Проверяем доступ к курсу для студентов
+        if current_user.role != 'admin':
+            access = session.query(CourseAccess).filter_by(
+                user_id=current_user.id,
+                course_id=course_id
+            ).first()
+            
+            if not access:
+                return jsonify({'error': 'No access to this course'}), 403
+                
+            if access.end_date < datetime.utcnow():
+                return jsonify({'error': 'Access expired'}), 403
+
+        # Получаем PDF документы курса
+        pdfs = session.query(PdfDocument).filter_by(course_id=course_id).all()
+        
+        pdfs_data = [{
+            'id': pdf.id,
+            'title': pdf.title,
+            'file_path': pdf.file_path,
+            'created_at': pdf.created_at.isoformat()
+        } for pdf in pdfs]
+        
+        return jsonify({'pdfs': pdfs_data}), 200
+
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@course_bp.route('/course/<int:course_id>/pdf', methods=['POST'])
+@admin_required
+def add_pdf(current_user, course_id):
+    try:
+        # Проверяем существование курса
+        course = session.query(Course).filter_by(id=course_id).first()
+        if not course:
+            return jsonify({'error': 'Course not found'}), 404
+
+        if 'pdf' not in request.files:
+            return jsonify({'error': 'No PDF file provided'}), 400
+            
+        file = request.files['pdf']
+        title = request.form.get('title')
+        
+        if not title:
+            return jsonify({'error': 'Title is required'}), 400
+            
+        if file.filename == '' or not allowed_file(file.filename, ALLOWED_PDF_EXTENSIONS):
+            return jsonify({'error': 'Invalid PDF file'}), 400
+
+        # Сохраняем PDF файл
+        file_path = save_file(file, PDF_UPLOAD_FOLDER)
+        
+        # Создаем запись в базе данных
+        new_pdf = PdfDocument(
+            title=title,
+            file_path=file_path,
+            course_id=course_id,
+            created_at=datetime.utcnow()
+        )
+        
+        session.add(new_pdf)
+        session.commit()
+        
+        return jsonify({
+            'message': 'PDF added successfully',
+            'pdf': {
+                'id': new_pdf.id,
+                'title': new_pdf.title,
+                'file_path': new_pdf.file_path,
+                'created_at': new_pdf.created_at.isoformat()
+            }
+        }), 201
+        
+    except Exception as e:
+        session.rollback()
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        return jsonify({'error': str(e)}), 500
+
+@course_bp.route('/course/<int:course_id>/pdf/<int:pdf_id>', methods=['PUT'])
+@admin_required
+def update_pdf(current_user, course_id, pdf_id):
+    try:
+        pdf = session.query(PdfDocument).filter_by(id=pdf_id, course_id=course_id).first()
+        if not pdf:
+            return jsonify({'error': 'PDF not found'}), 404
+
+        # Обновляем название если предоставлено
+        if 'title' in request.form:
+            pdf.title = request.form['title']
+
+        # Обновляем файл если предоставлен
+        if 'pdf' in request.files:
+            file = request.files['pdf']
+            if file.filename != '' and allowed_file(file.filename, ALLOWED_PDF_EXTENSIONS):
+                # Удаляем старый файл
+                delete_file(pdf.file_path)
+                # Сохраняем новый файл
+                file_path = save_file(file, PDF_UPLOAD_FOLDER)
+                pdf.file_path = file_path
+
+        session.commit()
+        
+        return jsonify({
+            'message': 'PDF updated successfully',
+            'pdf': {
+                'id': pdf.id,
+                'title': pdf.title,
+                'file_path': pdf.file_path,
+                'created_at': pdf.created_at.isoformat()
+            }
+        }), 200
+        
+    except Exception as e:
+        session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@course_bp.route('/course/<int:course_id>/pdf/<int:pdf_id>', methods=['DELETE'])
+@admin_required
+def delete_pdf(current_user, course_id, pdf_id):
+    try:
+        pdf = session.query(PdfDocument).filter_by(id=pdf_id, course_id=course_id).first()
+        if not pdf:
+            return jsonify({'error': 'PDF not found'}), 404
+
+        # Удаляем файл
+        delete_file(pdf.file_path)
+        
+        # Удаляем запись из базы данных
+        session.delete(pdf)
+        session.commit()
+        
+        return jsonify({'message': 'PDF deleted successfully'}), 200
+        
+    except Exception as e:
+        session.rollback()
+        return jsonify({'error': str(e)}), 500
+
+@course_bp.route('/course/<int:course_id>/pdf/<int:pdf_id>', methods=['GET'])
+@token_required
+def get_pdf(current_user, course_id, pdf_id):
+    try:
+        pdf = session.query(PdfDocument).filter_by(id=pdf_id, course_id=course_id).first()
+        if not pdf:
+            return jsonify({'error': 'PDF not found'}), 404
+
+        # Проверяем доступ к курсу для студентов
+        if current_user.role != 'admin':
+            access = session.query(CourseAccess).filter_by(
+                user_id=current_user.id,
+                course_id=course_id
+            ).first()
+            
+            if not access:
+                return jsonify({'error': 'No access to this PDF'}), 403
+                
+            if access.end_date < datetime.utcnow():
+                return jsonify({'error': 'Access expired'}), 403
+
+        return send_file(
+            pdf.file_path,
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=f"{pdf.title}.pdf"
+        )
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 @course_bp.route('/courses', methods=['GET'])
 @token_required 
@@ -228,8 +408,13 @@ def delete_course(current_user, course_id):
         for video in videos:
             delete_file(video.file_path)
             delete_file(video.thumbnail_url)
-            session.delete(video)
             
+        # Удаляем все PDF документы курса
+        pdfs = session.query(PdfDocument).filter_by(course_id=course_id).all()
+        for pdf in pdfs:
+            delete_file(pdf.file_path)
+        
+        # Удаляем курс, видео и PDF удаляются каскадно
         session.delete(course)
         session.commit()
         return jsonify({'message': 'Course deleted successfully'}), 200
