@@ -5,6 +5,7 @@ from werkzeug.utils import secure_filename
 from models import session, Course, CourseAccess, Video, User, Comment, PdfDocument
 from auth import token_required, admin_required
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import func
 
 course_bp = Blueprint('course', __name__)
 
@@ -99,11 +100,16 @@ def add_pdf(current_user, course_id):
         # Сохраняем PDF файл
         file_path = save_file(file, PDF_UPLOAD_FOLDER)
         
+        # Получаем максимальный order для текущего курса
+        max_order = session.query(func.max(PdfDocument.order)).filter_by(course_id=course_id).scalar()
+        next_order = 1 if max_order is None else max_order + 1
+        
         # Создаем запись в базе данных
         new_pdf = PdfDocument(
             title=title,
             file_path=file_path,
             course_id=course_id,
+            order=next_order,
             created_at=datetime.utcnow()
         )
         
