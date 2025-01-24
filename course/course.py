@@ -39,6 +39,99 @@ def delete_file(file_path):
     if file_path and os.path.exists(file_path):
         os.remove(file_path)
 
+@course_bp.route('/users', methods=['GET'])
+@admin_required
+def get_users(current_user):
+    try:
+        # Get all users
+        users = session.query(User).all()
+        
+        users_list = []
+        for user in users:
+            users_list.append({
+                'id': user.id,
+                'email': user.email,
+                'first_name': user.first_name,
+                'role': user.role
+            })
+            
+        return jsonify({'users': users_list}), 200
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@course_bp.route('/users/<int:user_id>', methods=['GET', 'PUT'])
+@admin_required
+def edit_user(current_user, user_id):
+    if request.method == 'GET':
+        try:
+            user = session.query(User).filter_by(id=user_id).first()
+            if not user:
+                return jsonify({'error': 'User not found'}), 404
+
+            return jsonify({
+                'user': {
+                    'id': user.id,
+                    'email': user.email, 
+                    'first_name': user.first_name,
+                    'role': user.role
+                }
+            }), 200
+
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+    elif request.method == 'PUT':
+        try:
+            user = session.query(User).filter_by(id=user_id).first()
+            if not user:
+                return jsonify({'error': 'User not found'}), 404
+
+            data = request.get_json()
+            
+            if 'email' in data:
+                user.email = data['email']
+            if 'first_name' in data:
+                user.first_name = data['first_name']
+            if 'role' in data:
+                user.role = data['role']
+                
+            session.commit()
+            
+            return jsonify({
+                'message': 'User updated successfully',
+                'user': {
+                    'id': user.id,
+                    'email': user.email,
+                    'first_name': user.first_name,
+                    'role': user.role
+                }
+            }), 200
+            
+        except Exception as e:
+            session.rollback()
+            return jsonify({'error': str(e)}), 500
+
+@course_bp.route('/users/<int:user_id>', methods=['DELETE'])
+@admin_required
+def delete_user(current_user, user_id):
+    try:
+        user = session.query(User).filter_by(id=user_id).first()
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+            
+        if user.id == current_user.id:
+            return jsonify({'error': 'Cannot delete yourself'}), 400
+            
+        session.delete(user)
+        session.commit()
+        
+        return jsonify({'message': 'User deleted successfully'}), 200
+        
+    except Exception as e:
+        session.rollback()
+        return jsonify({'error': str(e)}), 500
+
 @course_bp.route('/course/<int:course_id>/pdfs', methods=['GET'])
 @token_required
 def get_course_pdfs(current_user, course_id):
@@ -61,13 +154,14 @@ def get_course_pdfs(current_user, course_id):
             if access.end_date < datetime.utcnow():
                 return jsonify({'error': 'Access expired'}), 403
 
-        # Получаем PDF документы курса
-        pdfs = session.query(PdfDocument).filter_by(course_id=course_id).all()
+        # Получаем PDF документы курса, сортируем по order
+        pdfs = session.query(PdfDocument).filter_by(course_id=course_id).order_by(PdfDocument.order).all()
         
         pdfs_data = [{
             'id': pdf.id,
             'title': pdf.title,
             'file_path': pdf.file_path,
+            'order': pdf.order,
             'created_at': pdf.created_at.isoformat()
         } for pdf in pdfs]
         
@@ -85,31 +179,27 @@ def add_pdf(current_user, course_id):
         if not course:
             return jsonify({'error': 'Course not found'}), 404
 
-        if 'pdf' not in request.files:
-            return jsonify({'error': 'No PDF file provided'}), 400
-            
-        file = request.files['pdf']
-        title = request.form.get('title')
-        
-        if not title:
-            return jsonify({'error': 'Title is required'}), 400
-            
-        if file.filename == '' or not allowed_file(file.filename, ALLOWED_PDF_EXTENSIONS):
-            return jsonify({'error': 'Invalid PDF file'}), 400
+        # Получаем данные из запроса
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data provided'}), 400
 
-        # Сохраняем PDF файл
-        file_path = save_file(file, PDF_UPLOAD_FOLDER)
-        
-        # Получаем максимальный order для текущего курса
+        title = data.get('title')
+        pdf_url = data.get('pdf_url')
+
+        if not title or not pdf_url:
+            return jsonify({'error': 'Title and PDF URL are required'}), 400
+
+        # Если order не указан, добавляем в конец
         max_order = session.query(func.max(PdfDocument.order)).filter_by(course_id=course_id).scalar()
-        next_order = 1 if max_order is None else max_order + 1
-        
+        order = 1 if max_order is None else max_order + 1
+
         # Создаем запись в базе данных
         new_pdf = PdfDocument(
             title=title,
-            file_path=file_path,
+            file_path=pdf_url,
             course_id=course_id,
-            order=next_order,
+            order=order,
             created_at=datetime.utcnow()
         )
         
@@ -122,19 +212,20 @@ def add_pdf(current_user, course_id):
                 'id': new_pdf.id,
                 'title': new_pdf.title,
                 'file_path': new_pdf.file_path,
+                'order': new_pdf.order,
                 'created_at': new_pdf.created_at.isoformat()
             }
         }), 201
         
     except Exception as e:
         session.rollback()
-        if os.path.exists(file_path):
-            os.remove(file_path)
         return jsonify({'error': str(e)}), 500
 
 @course_bp.route('/course/<int:course_id>/pdf/<int:pdf_id>', methods=['PUT'])
 @admin_required
 def update_pdf(current_user, course_id, pdf_id):
+    old_file_path = None
+    new_file_path = None
     try:
         pdf = session.query(PdfDocument).filter_by(id=pdf_id, course_id=course_id).first()
         if not pdf:
@@ -144,17 +235,38 @@ def update_pdf(current_user, course_id, pdf_id):
         if 'title' in request.form:
             pdf.title = request.form['title']
 
+        # Обновляем order если предоставлен
+        if 'order' in request.form:
+            new_order = int(request.form['order'])
+            if new_order != pdf.order:
+                # Сдвигаем существующие PDF
+                if new_order > pdf.order:
+                    session.query(PdfDocument).filter(
+                        PdfDocument.course_id == course_id,
+                        PdfDocument.order > pdf.order,
+                        PdfDocument.order <= new_order
+                    ).update({PdfDocument.order: PdfDocument.order - 1})
+                else:
+                    session.query(PdfDocument).filter(
+                        PdfDocument.course_id == course_id,
+                        PdfDocument.order >= new_order,
+                        PdfDocument.order < pdf.order
+                    ).update({PdfDocument.order: PdfDocument.order + 1})
+                pdf.order = new_order
+
         # Обновляем файл если предоставлен
         if 'pdf' in request.files:
             file = request.files['pdf']
             if file.filename != '' and allowed_file(file.filename, ALLOWED_PDF_EXTENSIONS):
-                # Удаляем старый файл
-                delete_file(pdf.file_path)
-                # Сохраняем новый файл
-                file_path = save_file(file, PDF_UPLOAD_FOLDER)
-                pdf.file_path = file_path
+                old_file_path = pdf.file_path
+                new_file_path = save_file(file, PDF_UPLOAD_FOLDER)
+                pdf.file_path = new_file_path
 
         session.commit()
+        
+        # Удаляем старый файл только после успешного коммита
+        if old_file_path:
+            delete_file(old_file_path)
         
         return jsonify({
             'message': 'PDF updated successfully',
@@ -162,12 +274,16 @@ def update_pdf(current_user, course_id, pdf_id):
                 'id': pdf.id,
                 'title': pdf.title,
                 'file_path': pdf.file_path,
+                'order': pdf.order,
                 'created_at': pdf.created_at.isoformat()
             }
         }), 200
         
     except Exception as e:
         session.rollback()
+        # В случае ошибки удаляем новый файл если он был создан
+        if new_file_path and os.path.exists(new_file_path):
+            os.remove(new_file_path)
         return jsonify({'error': str(e)}), 500
 
 @course_bp.route('/course/<int:course_id>/pdf/<int:pdf_id>', methods=['DELETE'])
@@ -178,12 +294,22 @@ def delete_pdf(current_user, course_id, pdf_id):
         if not pdf:
             return jsonify({'error': 'PDF not found'}), 404
 
-        # Удаляем файл
-        delete_file(pdf.file_path)
-        
+        current_order = pdf.order
+        file_path = pdf.file_path
+
         # Удаляем запись из базы данных
         session.delete(pdf)
+        
+        # Обновляем order для оставшихся PDF
+        session.query(PdfDocument).filter(
+            PdfDocument.course_id == course_id,
+            PdfDocument.order > current_order
+        ).update({PdfDocument.order: PdfDocument.order - 1})
+        
         session.commit()
+        
+        # Удаляем файл после успешного коммита
+        delete_file(file_path)
         
         return jsonify({'message': 'PDF deleted successfully'}), 200
         
@@ -198,6 +324,8 @@ def get_pdf(current_user, course_id, pdf_id):
         pdf = session.query(PdfDocument).filter_by(id=pdf_id, course_id=course_id).first()
         if not pdf:
             return jsonify({'error': 'PDF not found'}), 404
+        
+        print(f"PDF file path: {pdf.file_path}")
 
         # Проверяем доступ к курсу для студентов
         if current_user.role != 'admin':
@@ -212,14 +340,23 @@ def get_pdf(current_user, course_id, pdf_id):
             if access.end_date < datetime.utcnow():
                 return jsonify({'error': 'Access expired'}), 403
 
-        return send_file(
-            pdf.file_path,
-            mimetype='application/pdf',
-            as_attachment=True,
-            download_name=f"{pdf.title}.pdf"
-        )
+        # Проверяем существование файла
+        if not os.path.exists(pdf.file_path):
+            return jsonify({'error': 'PDF file not found on server'}), 404
+
+        try:
+            return send_file(
+                pdf.file_path,
+                mimetype='application/pdf',
+                as_attachment=True,
+                download_name=f"{pdf.title}.pdf"
+            )
+        except Exception as e:
+            print(f"Error sending file: {str(e)}")
+            return jsonify({'error': 'Error sending PDF file'}), 500
         
     except Exception as e:
+        print(f"Error in get_pdf: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @course_bp.route('/courses', methods=['GET'])
@@ -447,25 +584,7 @@ def delete_course(current_user, course_id):
         print(traceback.format_exc())
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
     
-@course_bp.route('/users', methods=['GET'])
-@admin_required
-def get_users(current_user):
-    try:
-        # Получаем всех пользователей с ролью student
-        users = session.query(User).filter_by(role='student').all()
-        
-        users_list = []
-        for user in users:
-            users_list.append({
-                'id': user.id,
-                'email': user.email,
-                'name': user.first_name
-            })
-            
-        return jsonify({'users': users_list}), 200
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+
 
 
 @course_bp.route('/course/grant-access', methods=['POST'])
