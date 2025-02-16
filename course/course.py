@@ -1,4 +1,4 @@
-from flask import Blueprint, request, jsonify, send_file
+from flask import Blueprint, request, jsonify, send_file, make_response
 from datetime import datetime, timedelta
 import os
 from werkzeug.utils import secure_filename
@@ -6,8 +6,11 @@ from models import session, Course, CourseAccess, Video, User, Comment, PdfDocum
 from auth import token_required, admin_required
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy import func
+from flask_cors import CORS
+from sqlalchemy.sql import text
 
 course_bp = Blueprint('course', __name__)
+CORS(course_bp)
 
 # Конфигурация для загрузки файлов
 UPLOAD_FOLDER = 'uploads'
@@ -585,7 +588,33 @@ def delete_course(current_user, course_id):
         return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
     
 
-
+@course_bp.route('/course/revoke-access', methods=['POST'])
+@admin_required
+def revoke_course_access(current_user):
+    try:
+        data = request.get_json()
+        
+        if not all(k in data for k in ['user_id', 'course_id']):
+            return jsonify({'error': 'Missing required fields'}), 400
+            
+        # Проверяем существование записи о доступе
+        access = session.query(CourseAccess).filter_by(
+            user_id=data['user_id'],
+            course_id=data['course_id']
+        ).first()
+        
+        if not access:
+            return jsonify({'error': 'Access record not found'}), 404
+            
+        # Удаляем запись о доступе
+        session.delete(access)
+        session.commit()
+        
+        return jsonify({'message': 'Course access revoked successfully'}), 200
+        
+    except Exception as e:
+        session.rollback()
+        return jsonify({'error': str(e)}), 500
 
 @course_bp.route('/course/grant-access', methods=['POST'])
 @admin_required
@@ -674,41 +703,66 @@ def get_course_videos(current_user, course_id):
 @admin_required
 def add_video(current_user, course_id):
     try:
-        # Получаем данные из JSON
+        course = session.query(Course).filter_by(id=course_id).first()
+        if not course:
+            return jsonify({'error': 'Course not found'}), 404
+
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No data provided'}), 400
             
         title = data.get('title')
-        video_url = data.get('video_url')  # URL из Cloudinary
-        thumbnail_url = data.get('thumbnail_url')  # URL из Cloudinary
-        
-        if not title or not video_url:
-            return jsonify({'error': 'Title and video URL are required'}), 400
-        
-        # Получаем порядковый номер
-        last_video = session.query(Video).filter_by(course_id=course_id).order_by(Video.order.desc()).first()
-        next_order = (last_video.order + 1) if last_video else 1
-        
-        new_video = Video(
-            title=title,
-            file_path=video_url,  # Сохраняем URL из Cloudinary
-            thumbnail_url=thumbnail_url,
-            course_id=course_id,
-            order=next_order
-        )
-        
-        session.add(new_video)
-        session.commit()
-        
-        return jsonify({
-            'message': 'Video added successfully',
-            'video_id': new_video.id,
-            'video_url': video_url
-        }), 201
-        
+        video_url = data.get('video_url')
+        video_source = data.get('video_source')
+        thumbnail_url = data.get('thumbnail_url', '')
+
+        print(f"Received data: title={title}, video_url={video_url}, source={video_source}")
+
+        if not all([title, video_url, video_source]):
+            return jsonify({'error': 'Title, video URL and source are required'}), 400
+
+        # Проверяем и нормализуем video_source
+        valid_sources = ['youtube', 'local']
+        if video_source not in valid_sources:
+            return jsonify({'error': f'Invalid video source. Must be one of: {", ".join(valid_sources)}'}), 400
+
+        try:
+            last_video = session.query(Video).filter_by(course_id=course_id).order_by(Video.order.desc()).first()
+            next_order = (last_video.order + 1) if last_video else 1
+
+            # Создаем новое видео с явным указанием типа
+            new_video = Video(
+                title=title,
+                file_path=video_url,
+                thumbnail_url=thumbnail_url,
+                course_id=course_id,
+                order=next_order,
+                video_source=str(video_source)  # Явно преобразуем в строку
+            )
+            
+            session.add(new_video)
+            session.commit()
+            
+            return jsonify({
+                'message': 'Video added successfully',
+                'video': {
+                    'id': new_video.id,
+                    'title': new_video.title,
+                    'file_path': new_video.file_path,
+                    'thumbnail_url': new_video.thumbnail_url,
+                    'order': next_order,
+                    'video_source': video_source
+                }
+            }), 201
+            
+        except SQLAlchemyError as e:
+            session.rollback()
+            print(f"Database error in add_video: {str(e)}")
+            return jsonify({'error': f'Database error: {str(e)}'}), 500
+            
     except Exception as e:
         session.rollback()
+        print(f"Error in add_video: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @course_bp.route('/course/<int:course_id>/video/<int:video_id>', methods=['DELETE'])

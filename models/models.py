@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import create_engine, Column, String, DateTime, ForeignKey, Enum as DbEnum, LargeBinary, Integer  # noqa
+from sqlalchemy import create_engine, Column, String, DateTime, ForeignKey, Enum as DbEnum, LargeBinary, Integer, text  # noqa
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.sql import func #noqa
@@ -43,13 +43,15 @@ class Course(Base):
 class Video(Base):
     __tablename__ = 'videos'
     
-    id = Column(Integer, primary_key=True)
+    id = Column(Integer, primary_key=True, autoincrement=True)
     title = Column(String(200), nullable=False)
     file_path = Column(String(500), nullable=False)
-    thumbnail_url = Column(String(500))  # URL or path to video thumbnail image
+    thumbnail_url = Column(String(500))
     course_id = Column(Integer, ForeignKey('courses.id'), nullable=False)
     order = Column(Integer, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    video_source = Column(DbEnum('youtube', 'local', name='video_sources', create_type=False), nullable=False)
+
 
 class PdfDocument(Base):
     __tablename__ = 'pdf_documents'
@@ -80,5 +82,8 @@ class Comment(Base):
     video_id = Column(Integer, ForeignKey('videos.id'), nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+# Пересоздаем enum тип
+
 # Создание таблиц (перемещено в конец файла)
 Base.metadata.create_all(bind=engine)
+
